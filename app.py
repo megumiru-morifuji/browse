@@ -2,10 +2,25 @@ import os
 import requests
 import json
 import time
+import logging
+import sys
 from datetime import datetime
 from flask import Flask, request, jsonify
 import google.generativeai as genai
-import sys
+
+# ログ設定を最初に実行
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.StreamHandler(sys.stderr)
+    ]
+)
+
+# 専用ロガーを作成
+logger = logging.getLogger('ebay_analyzer')
+logger.setLevel(logging.INFO)
 
 # 最小限のエンコーディング設定
 os.environ['PYTHONIOENCODING'] = 'utf-8'
@@ -23,17 +38,23 @@ EBAY_OAUTH_TOKEN = os.environ.get('EBAY_OAUTH_TOKEN', '')
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel('gemini-pro')
 
-# ログ機能（コンソール出力なし、メモリに保存）
-class Logger:
+# メモリログ機能（Renderログ表示用）
+class MemoryLogger:
     def __init__(self):
         self.logs = []
         self.max_logs = 100
     
     def log(self, message):
-        """ログをメモリに保存（コンソール出力しない）"""
+        """メモリとstdoutの両方にログを出力"""
         timestamp = datetime.now().strftime('%H:%M:%S')
         log_entry = f"[{timestamp}] {str(message)}"
         self.logs.append(log_entry)
+        
+        # Renderのログに確実に表示させる
+        logger.info(message)
+        print(f"[EBAY_ANALYZER] {log_entry}", flush=True)
+        sys.stdout.flush()
+        sys.stderr.flush()
         
         # 古いログを削除
         if len(self.logs) > self.max_logs:
@@ -43,8 +64,8 @@ class Logger:
         """最新のログを取得"""
         return self.logs[-count:] if self.logs else []
 
-# グローバルログインスタンス
-logger = Logger()
+# グローバルメモリログインスタンス
+memory_logger = MemoryLogger()
 
 class EBayBrowseAPI:
     def __init__(self, oauth_token):
@@ -80,25 +101,25 @@ class EBayBrowseAPI:
         }
         
         try:
-            logger.log(f"API request: {search_query} (limit: {limit})")
+            memory_logger.log(f"API request: {search_query} (limit: {limit})")
             response = requests.get(url, headers=self.headers, params=params, timeout=30)
             response.raise_for_status()
             response.encoding = 'utf-8'
             
             result = response.json()
             items_count = len(result.get('itemSummaries', []))
-            logger.log(f"API response: {items_count} items retrieved")
+            memory_logger.log(f"API response: {items_count} items retrieved")
             
             return result
             
         except requests.exceptions.RequestException as e:
-            logger.log(f"API request error: {str(e)}")
+            memory_logger.log(f"API request error: {str(e)}")
             return None
         except json.JSONDecodeError as e:
-            logger.log(f"JSON decode error: {str(e)}")
+            memory_logger.log(f"JSON decode error: {str(e)}")
             return None
         except Exception as e:
-            logger.log(f"Parse error: {str(e)}")
+            memory_logger.log(f"Parse error: {str(e)}")
             return None
     
     def get_item_details(self, item_id):
@@ -111,7 +132,7 @@ class EBayBrowseAPI:
             response.encoding = 'utf-8'
             return response.json()
         except Exception as e:
-            logger.log(f"Item details error: {str(e)}")
+            memory_logger.log(f"Item details error: {str(e)}")
             return None
 
 class JapaneseProductAnalyzer:
@@ -119,28 +140,26 @@ class JapaneseProductAnalyzer:
         self.model = model
     
     def analyze_product_data(self, products_data):
-        """商品データを分析（コンソール出力なし）"""
+        """商品データを分析"""
         if not products_data:
             return "データがありません。"
         
-        logger.log("AI analysis started")
+        memory_logger.log("AI analysis started")
         analysis_data = self._prepare_analysis_data(products_data)
         
-        # 日本語でプロンプトを作成（問題なし）
+        # 日本語でプロンプトを作成
         prompt = self._create_analysis_prompt_jp(analysis_data)
         
         try:
             response = self.model.generate_content(prompt)
             result_text = response.text
             
-            logger.log("AI analysis completed successfully")
-            
-            # 日本語の結果をそのまま返す（JSON APIレスポンスなので問題なし）
+            memory_logger.log("AI analysis completed successfully")
             return result_text
             
         except Exception as e:
             error_msg = f"分析エラー: {str(e)}"
-            logger.log(error_msg)
+            memory_logger.log(error_msg)
             return error_msg
     
     def _prepare_analysis_data(self, products_data):
@@ -206,7 +225,7 @@ class JapaneseProductAnalyzer:
         return None
     
     def _create_analysis_prompt_jp(self, data):
-        """日本語での分析用プロンプトを作成（完全に問題なし）"""
+        """日本語での分析用プロンプトを作成"""
         return f"""
 以下のeBay和風商品データを分析して、詳細なマーケット分析レポートを日本語で作成してください。
 
@@ -266,44 +285,46 @@ def get_ebay_oauth_token(client_id, client_secret):
         response = requests.post(url, headers=headers, data=data, timeout=30)
         response.raise_for_status()
         token_data = response.json()
-        logger.log("OAuth token retrieved successfully")
+        memory_logger.log("OAuth token retrieved successfully")
         return token_data.get('access_token')
     except Exception as e:
-        logger.log(f"OAuth token error: {str(e)}")
+        memory_logger.log(f"OAuth token error: {str(e)}")
         return None
 
 @app.route('/analyze-japanese-products', methods=['GET', 'POST'])
 def analyze_japanese_products():
-    """和風商品分析のメインエンドポイント（コンソール出力なし版）"""
+    """和風商品分析のメインエンドポイント"""
     try:
         # パラメータ取得
         search_terms = request.args.get('search', 'collectibles')
         max_items = min(int(request.args.get('limit', 100)), 200)
         
-        logger.log("=== eBay Japanese Products Analysis Start ===")
-        logger.log(f"Search keywords: {search_terms}")
-        logger.log(f"Max items: {max_items}")
+        memory_logger.log("=== eBay Japanese Products Analysis Start ===")
+        memory_logger.log(f"Search keywords: {search_terms}")
+        memory_logger.log(f"Max items: {max_items}")
         
         # OAuthトークンの確認/取得
         oauth_token = EBAY_OAUTH_TOKEN
         if not oauth_token:
-            logger.log("Getting new OAuth token...")
+            memory_logger.log("Getting new OAuth token...")
             oauth_token = get_ebay_oauth_token(EBAY_APP_ID, EBAY_CLIENT_SECRET)
             if not oauth_token:
-                return jsonify({"error": "Failed to get OAuth token"}), 500
+                error_msg = "Failed to get OAuth token"
+                memory_logger.log(error_msg)
+                return jsonify({"error": error_msg}), 500
         
         # eBay API初期化
         ebay_api = EBayBrowseAPI(oauth_token)
         analyzer = JapaneseProductAnalyzer(model)
         
         # 商品データ収集
-        logger.log("--- Collecting product data ---")
+        memory_logger.log("--- Collecting product data ---")
         all_products = []
         batch_size = 50
         
         for offset in range(0, max_items, batch_size):
             current_limit = min(batch_size, max_items - offset)
-            logger.log(f"Batch {offset//batch_size + 1}: Getting {current_limit} items...")
+            memory_logger.log(f"Batch {offset//batch_size + 1}: Getting {current_limit} items...")
             
             search_result = ebay_api.search_japanese_items(
                 search_terms, 
@@ -316,50 +337,53 @@ def analyze_japanese_products():
                 all_products.extend(products)
                 time.sleep(1)  # API制限対応
             else:
-                logger.log("No search results found")
+                memory_logger.log("No search results found")
                 break
         
-        logger.log(f"Total items retrieved: {len(all_products)}")
+        memory_logger.log(f"Total items retrieved: {len(all_products)}")
         
         if not all_products:
-            result = {"error": "和風商品が見つかりませんでした", "products_found": 0}
+            error_msg = "和風商品が見つかりませんでした"
+            memory_logger.log(error_msg)
+            result = {"error": error_msg, "products_found": 0}
             return jsonify(result)
         
-        # データ分析実行（日本語結果をそのまま取得）
-        logger.log("--- AI Analysis in progress ---")
+        # データ分析実行
+        memory_logger.log("--- AI Analysis in progress ---")
         analysis_result = analyzer.analyze_product_data(all_products)
         
-        # レスポンス作成（日本語も含めて全て問題なし）
+        # レスポンス作成
         result = {
             "success": True,
-            "analysis": analysis_result,  # 日本語分析結果
+            "analysis": analysis_result,
             "products_analyzed": len(all_products),
             "search_terms": search_terms,
             "timestamp": datetime.now().isoformat(),
             "sample_products": all_products[:10],
-            "logs": logger.get_recent_logs(10)  # 最新10件のログも含める
+            "logs": memory_logger.get_recent_logs(10)
         }
         
-        logger.log("Analysis completed successfully")
+        memory_logger.log("Analysis completed successfully")
         return jsonify(result)
         
     except Exception as e:
         error_msg = f"分析中にエラーが発生しました: {str(e)}"
-        logger.log(f"Error: {error_msg}")
-        return jsonify({"error": error_msg, "logs": logger.get_recent_logs(5)}), 500
+        memory_logger.log(f"Error: {error_msg}")
+        return jsonify({"error": error_msg, "logs": memory_logger.get_recent_logs(5)}), 500
 
 @app.route('/logs')
 def get_logs():
     """実行ログを取得するエンドポイント"""
     count = int(request.args.get('count', 50))
     return jsonify({
-        "logs": logger.get_recent_logs(count),
-        "total_logs": len(logger.logs)
+        "logs": memory_logger.get_recent_logs(count),
+        "total_logs": len(memory_logger.logs)
     })
 
 @app.route('/health')
 def health_check():
     """ヘルスチェック"""
+    memory_logger.log("Health check requested")
     return jsonify({
         "status": "healthy", 
         "service": "eBay Japanese Products Analyzer",
@@ -369,6 +393,7 @@ def health_check():
 @app.route('/')
 def home():
     """ホームページ"""
+    memory_logger.log("Homepage accessed")
     return jsonify({
         "service": "eBay Japanese Products Analyzer",
         "endpoints": {
@@ -386,8 +411,9 @@ def home():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     
-    # 起動メッセージだけは最小限でprint（英語のみ）
-    print("eBay Japanese Products Analysis Server starting...")
-    print(f"Port: {port}")
+    # 起動メッセージ
+    memory_logger.log("eBay Japanese Products Analysis Server starting...")
+    memory_logger.log(f"Port: {port}")
+    print("=== SERVER STARTING ===", flush=True)
     
     app.run(host='0.0.0.0', port=port, debug=False)
