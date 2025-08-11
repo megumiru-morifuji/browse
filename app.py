@@ -4,6 +4,7 @@ import json
 import time
 from datetime import datetime
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 import google.generativeai as genai
 import sys
 
@@ -12,6 +13,14 @@ os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False  # 日本語JSON対応
+
+# CORS設定を追加（重要！）
+CORS(app, origins=[
+    "https://browse-ursn.onrender.com",  # あなたのサイト
+    "https://*.onrender.com",  # 全てのRenderドメイン
+    "http://localhost:*",  # ローカル開発用
+    "https://localhost:*"  # ローカル開発用（HTTPS）
+])
 
 # 設定
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', 'AIzaSyC-nY_mkBTkQWwhcBWHCf-ng4as6_NaNSA')
@@ -30,14 +39,34 @@ class Logger:
         self.max_logs = 100
     
     def log(self, message):
-        """ログをメモリに保存（コンソール出力しない）"""
-        timestamp = datetime.now().strftime('%H:%M:%S')
-        log_entry = f"[{timestamp}] {str(message)}"
-        self.logs.append(log_entry)
-        
-        # 古いログを削除
-        if len(self.logs) > self.max_logs:
-            self.logs = self.logs[-self.max_logs:]
+        """ログをメモリに保存（完全に安全な文字列処理）"""
+        try:
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            
+            # 文字列を安全に処理（日本語やUnicode文字を除去）
+            if message is None:
+                message = "None"
+            
+            # 文字列に変換し、ASCII文字のみ保持
+            message_str = str(message)
+            safe_message = message_str.encode('ascii', errors='ignore').decode('ascii')
+            
+            # 空文字列の場合のデフォルト
+            if not safe_message.strip():
+                safe_message = "Message contained non-ASCII characters"
+            
+            log_entry = f"[{timestamp}] {safe_message}"
+            self.logs.append(log_entry)
+            
+            # 古いログを削除
+            if len(self.logs) > self.max_logs:
+                self.logs = self.logs[-self.max_logs:]
+                
+        except Exception as e:
+            # ログ処理自体でエラーが発生した場合
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            error_log = f"[{timestamp}] Log processing error occurred"
+            self.logs.append(error_log)
     
     def get_recent_logs(self, count=20):
         """最新のログを取得"""
@@ -65,7 +94,7 @@ class EBayBrowseAPI:
             "japanese", "japan", "kimono", "sushi", "anime", "manga", 
             "zen", "samurai", "ninja", "katana", "sake", "ramen",
             "origami", "bonsai", "furoshiki", "yukata", "geta", "zori",
-            "daruma", "kokeshi", "noren", "tenugui", "furoshiki"
+            "daruma", "kokeshi", "noren", "tenugui"
         ]
         
         search_query = f"{keywords} (" + " OR ".join(japanese_keywords) + ")"
@@ -80,25 +109,25 @@ class EBayBrowseAPI:
         }
         
         try:
-            logger.log(f"API request: {search_query} (limit: {limit})")
+            logger.log(f"API request started with limit: {limit}")
             response = requests.get(url, headers=self.headers, params=params, timeout=30)
             response.raise_for_status()
             response.encoding = 'utf-8'
             
             result = response.json()
             items_count = len(result.get('itemSummaries', []))
-            logger.log(f"API response: {items_count} items retrieved")
+            logger.log(f"API response received: {items_count} items")
             
             return result
             
         except requests.exceptions.RequestException as e:
-            logger.log(f"API request error: {str(e)}")
+            logger.log(f"API request failed: HTTP error occurred")
             return None
         except json.JSONDecodeError as e:
-            logger.log(f"JSON decode error: {str(e)}")
+            logger.log(f"JSON parsing failed: Invalid response format")
             return None
         except Exception as e:
-            logger.log(f"Parse error: {str(e)}")
+            logger.log(f"Unexpected error: API call failed")
             return None
     
     def get_item_details(self, item_id):
@@ -111,7 +140,7 @@ class EBayBrowseAPI:
             response.encoding = 'utf-8'
             return response.json()
         except Exception as e:
-            logger.log(f"Item details error: {str(e)}")
+            logger.log(f"Item details request failed")
             return None
 
 class JapaneseProductAnalyzer:
@@ -269,7 +298,7 @@ def get_ebay_oauth_token(client_id, client_secret):
         logger.log("OAuth token retrieved successfully")
         return token_data.get('access_token')
     except Exception as e:
-        logger.log(f"OAuth token error: {str(e)}")
+        logger.log("OAuth token request failed")
         return None
 
 @app.route('/analyze-japanese-products', methods=['GET', 'POST'])
