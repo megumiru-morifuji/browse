@@ -8,17 +8,58 @@ import google.generativeai as genai
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 import sys
+import locale
+
+# 強制的にUTF-8環境を設定
+os.environ['PYTHONIOENCODING'] = 'utf-8'
+os.environ['LC_ALL'] = 'C.UTF-8'
+os.environ['LANG'] = 'C.UTF-8'
+
+# ロケール設定
+try:
+    locale.setlocale(locale.LC_ALL, 'C.UTF-8')
+except:
+    try:
+        locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+    except:
+        pass
 
 # 文字エンコーディング設定
 if hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8')
-if hasattr(sys.stderr, 'reconfigure'):
-    sys.stderr.reconfigure(encoding='utf-8')
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except:
+        pass
 
 app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False  # 日本語JSON対応
 
 # 設定
+def safe_string(text, default="N/A"):
+    """文字列を安全に処理する"""
+    if text is None:
+        return default
+    try:
+        if isinstance(text, bytes):
+            return text.decode('utf-8', errors='replace')
+        text_str = str(text)
+        # 問題となる文字を除去・置換
+        safe_text = text_str.encode('ascii', errors='ignore').decode('ascii')
+        if not safe_text.strip():
+            # ASCII文字がない場合は、安全な文字のみ保持
+            safe_text = ''.join(c for c in text_str if ord(c) < 128)
+        return safe_text if safe_text else default
+    except Exception:
+        return default
+
+def safe_print(text):
+    """安全なprint関数"""
+    try:
+        safe_text = safe_string(str(text))
+        print(safe_text)
+    except Exception as e:
+        print(f"Print error: {safe_string(str(e))}")
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', 'AIzaSyC-nY_mkBTkQWwhcBWHCf-ng4as6_NaNSA')
 EBAY_APP_ID = os.environ.get('EBAY_APP_ID', 'myappsal-PRD-30bd30580-765b58a1')
 EBAY_CLIENT_SECRET = os.environ.get('EBAY_CLIENT_SECRET', '')  # 環境変数で設定
@@ -65,13 +106,22 @@ class EBayBrowseAPI:
         try:
             response = requests.get(url, headers=self.headers, params=params, timeout=30)
             response.raise_for_status()
-            response.encoding = 'utf-8'  # エンコーディング明示
-            return response.json()
+            
+            # レスポンスのエンコーディングを確認・設定
+            if response.encoding is None or response.encoding.lower() != 'utf-8':
+                response.encoding = 'utf-8'
+            
+            result = response.json()
+            return result
+            
         except requests.exceptions.RequestException as e:
-            print(f"API request error: {str(e).encode('utf-8', errors='ignore').decode('utf-8')}")
+            safe_print(f"API request error: {safe_string(str(e))}")
+            return None
+        except json.JSONDecodeError as e:
+            safe_print(f"JSON decode error: {safe_string(str(e))}")
             return None
         except Exception as e:
-            print(f"Parse error: {str(e).encode('utf-8', errors='ignore').decode('utf-8')}")
+            safe_print(f"Parse error: {safe_string(str(e))}")
             return None
     
     def get_item_details(self, item_id):
@@ -81,13 +131,16 @@ class EBayBrowseAPI:
         try:
             response = requests.get(url, headers=self.headers, timeout=30)
             response.raise_for_status()
-            response.encoding = 'utf-8'  # エンコーディング明示
+            
+            if response.encoding is None or response.encoding.lower() != 'utf-8':
+                response.encoding = 'utf-8'
+                
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"Item details error: {str(e).encode('utf-8', errors='ignore').decode('utf-8')}")
+            safe_print(f"Item details error: {safe_string(str(e))}")
             return None
         except Exception as e:
-            print(f"Parse error: {str(e).encode('utf-8', errors='ignore').decode('utf-8')}")
+            safe_print(f"Parse error: {safe_string(str(e))}")
             return None
 
 class JapaneseProductAnalyzer:
@@ -97,25 +150,25 @@ class JapaneseProductAnalyzer:
     def analyze_product_data(self, products_data):
         """商品データを分析"""
         if not products_data:
-            return "分析するデータがありません。"
+            return "No data to analyze."
         
         # データを整理
         analysis_data = self._prepare_analysis_data(products_data)
         
-        # Geminiで分析
-        prompt = self._create_analysis_prompt(analysis_data)
+        # 日本語を避けて英語でプロンプトを作成
+        prompt = self._create_analysis_prompt_en(analysis_data)
         
         try:
             response = self.model.generate_content(prompt)
-            # レスポンスを安全にエンコード
             result_text = response.text
-            if isinstance(result_text, str):
-                # 安全な文字のみ保持
-                result_text = result_text.encode('utf-8', errors='ignore').decode('utf-8')
-            return result_text
+            
+            # 結果を安全な文字列に変換
+            safe_result = safe_string(result_text, "Analysis completed but text encoding failed")
+            return safe_result
+            
         except Exception as e:
-            error_msg = f"分析中にエラーが発生しました: {str(e).encode('utf-8', errors='ignore').decode('utf-8')}"
-            print(error_msg)
+            error_msg = f"Analysis error: {safe_string(str(e))}"
+            safe_print(error_msg)
             return error_msg
     
     def _prepare_analysis_data(self, products_data):
@@ -155,14 +208,14 @@ class JapaneseProductAnalyzer:
             title = item.get('title', '')
             if title:
                 # 安全な文字列処理
-                title = str(title).encode('utf-8', errors='ignore').decode('utf-8').lower()
+                title = safe_string(title).lower()
                 japanese_keywords = ['japanese', 'japan', 'kimono', 'sushi', 'anime', 'manga', 'zen', 'samurai']
                 for keyword in japanese_keywords:
                     if keyword in title:
                         analysis_data['keywords'][keyword] = analysis_data['keywords'].get(keyword, 0) + 1
             
             # 出品者分析
-            seller = item.get('seller', {}).get('username', 'Unknown')
+            seller = safe_string(item.get('seller', {}).get('username', 'Unknown'))
             analysis_data['sellers'][seller] = analysis_data['sellers'].get(seller, 0) + 1
             
             # 商品状態分析
@@ -182,29 +235,29 @@ class JapaneseProductAnalyzer:
                     pass
         return None
     
-    def _create_analysis_prompt(self, data):
-        """分析用のプロンプトを作成"""
+    def _create_analysis_prompt_en(self, data):
+        """英語での分析用プロンプトを作成（文字エンコーディング問題を回避）"""
         return f"""
-以下のeBayの和風商品データを詳細に分析してください。日本語で分析結果を返してください。
+Please analyze the following eBay Japanese-style products data. Return analysis in English.
 
-データ概要:
-- 総商品数: {data['total_items']}
-- カテゴリー分布: {json.dumps(data['categories'], ensure_ascii=False, indent=2)}
-- 価格帯分布 (USD): {json.dumps(data['price_ranges'], ensure_ascii=False, indent=2)}
-- 人気キーワード: {json.dumps(data['keywords'], ensure_ascii=False, indent=2)}
-- 出品者分析: {json.dumps(dict(list(data['sellers'].items())[:10]), ensure_ascii=False, indent=2)}
-- 商品状態: {json.dumps(data['conditions'], ensure_ascii=False, indent=2)}
+Data Summary:
+- Total items: {data['total_items']}
+- Categories: {json.dumps(data['categories'], ensure_ascii=True)}
+- Price ranges (USD): {json.dumps(data['price_ranges'], ensure_ascii=True)}
+- Popular keywords: {json.dumps(data['keywords'], ensure_ascii=True)}
+- Top sellers: {json.dumps(dict(list(data['sellers'].items())[:10]), ensure_ascii=True)}
+- Item conditions: {json.dumps(data['conditions'], ensure_ascii=True)}
 
-以下の観点で分析してください:
-1. 最も人気のある和風商品カテゴリー
-2. 価格帯の傾向と市場動向
-3. 人気キーワードから見るトレンド
-4. 出品者の特徴（個人 vs 業者）
-5. 商品状態の傾向
-6. マーケティングの機会と推奨事項
-7. 競合分析の観点
+Please analyze from these perspectives:
+1. Most popular Japanese product categories
+2. Price range trends and market insights
+3. Popular keyword trends
+4. Seller characteristics (individual vs business)
+5. Item condition trends
+6. Marketing opportunities and recommendations
+7. Competitive analysis insights
 
-詳細で実用的な分析を日本語で提供してください。
+Provide detailed and practical analysis in English only.
 """
 
 def get_ebay_oauth_token(client_id, client_secret):
@@ -233,10 +286,10 @@ def get_ebay_oauth_token(client_id, client_secret):
         token_data = response.json()
         return token_data.get('access_token')
     except requests.exceptions.RequestException as e:
-        print(f"OAuth token error: {str(e).encode('utf-8', errors='ignore').decode('utf-8')}")
+        safe_print(f"OAuth token error: {safe_string(str(e))}")
         return None
     except Exception as e:
-        print(f"OAuth parse error: {str(e).encode('utf-8', errors='ignore').decode('utf-8')}")
+        safe_print(f"OAuth parse error: {safe_string(str(e))}")
         return None
 
 @app.route('/analyze-japanese-products', methods=['GET', 'POST'])
@@ -247,31 +300,31 @@ def analyze_japanese_products():
         search_terms = request.args.get('search', 'collectibles')
         max_items = min(int(request.args.get('limit', 100)), 200)  # 最大200件
         
-        print(f"=== eBay和風商品分析開始 ===")
-        print(f"検索キーワード: {search_terms}")
-        print(f"最大取得件数: {max_items}")
-        print(f"実行時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        safe_print(f"=== eBay Japanese Products Analysis Start ===")
+        safe_print(f"Search keywords: {search_terms}")
+        safe_print(f"Max items: {max_items}")
+        safe_print(f"Execution time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
         # OAuthトークンの確認/取得
         oauth_token = EBAY_OAUTH_TOKEN
         if not oauth_token:
-            print("OAuthトークンを新規取得中...")
+            safe_print("Getting new OAuth token...")
             oauth_token = get_ebay_oauth_token(EBAY_APP_ID, EBAY_CLIENT_SECRET)
             if not oauth_token:
-                return jsonify({"error": "OAuthトークンの取得に失敗しました"}), 500
+                return jsonify({"error": "Failed to get OAuth token"}), 500
         
         # eBay API初期化
         ebay_api = EBayBrowseAPI(oauth_token)
         analyzer = JapaneseProductAnalyzer(model)
         
         # 商品データ収集
-        print("\n--- 商品データ収集中 ---")
+        safe_print("\n--- Collecting product data ---")
         all_products = []
         batch_size = 50
         
         for offset in range(0, max_items, batch_size):
             current_limit = min(batch_size, max_items - offset)
-            print(f"バッチ {offset//batch_size + 1}: {current_limit}件取得中...")
+            safe_print(f"Batch {offset//batch_size + 1}: Getting {current_limit} items...")
             
             search_result = ebay_api.search_japanese_items(
                 search_terms, 
@@ -282,48 +335,48 @@ def analyze_japanese_products():
             if search_result and 'itemSummaries' in search_result:
                 products = search_result['itemSummaries']
                 all_products.extend(products)
-                print(f"取得完了: {len(products)}件")
+                safe_print(f"Retrieved: {len(products)} items")
                 
                 # API制限を考慮して待機
                 time.sleep(1)
             else:
-                print("検索結果が取得できませんでした")
+                safe_print("No search results found")
                 break
         
-        print(f"\n総取得件数: {len(all_products)}件")
+        safe_print(f"\nTotal items retrieved: {len(all_products)}")
         
         if not all_products:
-            result = {"error": "和風商品が見つかりませんでした", "products_found": 0}
-            print("結果: 商品が見つかりませんでした")
+            result = {"error": "No Japanese products found", "products_found": 0}
+            safe_print("Result: No products found")
             return jsonify(result)
         
         # データ分析実行
-        print("\n--- AI分析実行中 ---")
+        safe_print("\n--- AI Analysis in progress ---")
         analysis_result = analyzer.analyze_product_data(all_products)
         
         # 結果をコンソールに出力
-        print("\n" + "="*60)
-        print("🎌 eBay和風商品 AI分析結果")
-        print("="*60)
-        print(analysis_result)
-        print("="*60)
+        safe_print("\n" + "="*60)
+        safe_print("eBay Japanese Products AI Analysis Result")
+        safe_print("="*60)
+        safe_print(analysis_result)
+        safe_print("="*60)
         
         # サンプル商品情報も出力（安全な文字列処理）
-        print(f"\n📊 取得した商品サンプル (最初の5件):")
+        safe_print(f"\nSample products (first 5 items):")
         for i, product in enumerate(all_products[:5], 1):
             try:
-                title = str(product.get('title', 'タイトル不明')).encode('utf-8', errors='ignore').decode('utf-8')
+                title = safe_string(product.get('title', 'Unknown title'))
                 price_val = product.get('price', {}).get('value', 'N/A')
                 currency = product.get('price', {}).get('currency', '')
-                seller = str(product.get('seller', {}).get('username', 'N/A')).encode('utf-8', errors='ignore').decode('utf-8')
+                seller = safe_string(product.get('seller', {}).get('username', 'N/A'))
                 url = product.get('itemWebUrl', 'N/A')
                 
-                print(f"\n{i}. {title}")
-                print(f"   価格: {price_val} {currency}")
-                print(f"   出品者: {seller}")
-                print(f"   URL: {url}")
+                safe_print(f"\n{i}. {title}")
+                safe_print(f"   Price: {price_val} {currency}")
+                safe_print(f"   Seller: {seller}")
+                safe_print(f"   URL: {url}")
             except Exception as e:
-                print(f"\n{i}. 商品情報表示エラー: {str(e)}")
+                safe_print(f"\n{i}. Product display error: {safe_string(str(e))}")
                 continue
         
         # レスポンス作成
@@ -374,16 +427,16 @@ if __name__ == '__main__':
     missing_vars = [var for var in required_vars if not os.environ.get(var)]
     
     if missing_vars:
-        print(f"⚠️ 警告: 以下の環境変数が設定されていません: {missing_vars}")
-        print("環境変数を設定するか、コード内で直接指定してください。")
+        safe_print(f"Warning: Missing environment variables: {missing_vars}")
+        safe_print("Please set environment variables or specify directly in code.")
     
     # Renderのポート設定
     port = int(os.environ.get('PORT', 5000))
     
-    print("🚀 eBay和風商品分析サーバーを起動中...")
-    print(f"Port: {port}")
-    print("利用方法:")
-    print("  GET /analyze-japanese-products?search=kimono&limit=100")
-    print("  GET /health")
+    safe_print("Starting eBay Japanese Products Analysis Server...")
+    safe_print(f"Port: {port}")
+    safe_print("Usage:")
+    safe_print("  GET /analyze-japanese-products?search=kimono&limit=100")
+    safe_print("  GET /health")
     
     app.run(host='0.0.0.0', port=port, debug=False)
