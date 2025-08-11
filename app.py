@@ -7,8 +7,16 @@ from flask import Flask, request, jsonify
 import google.generativeai as genai
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
+import sys
+
+# 文字エンコーディング設定
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
 
 app = Flask(__name__)
+app.config['JSON_AS_ASCII'] = False  # 日本語JSON対応
 
 # 設定
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', 'AIzaSyC-nY_mkBTkQWwhcBWHCf-ng4as6_NaNSA')
@@ -55,11 +63,15 @@ class EBayBrowseAPI:
         }
         
         try:
-            response = requests.get(url, headers=self.headers, params=params)
+            response = requests.get(url, headers=self.headers, params=params, timeout=30)
             response.raise_for_status()
+            response.encoding = 'utf-8'  # エンコーディング明示
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"API request error: {e}")
+            print(f"API request error: {str(e).encode('utf-8', errors='ignore').decode('utf-8')}")
+            return None
+        except Exception as e:
+            print(f"Parse error: {str(e).encode('utf-8', errors='ignore').decode('utf-8')}")
             return None
     
     def get_item_details(self, item_id):
@@ -67,11 +79,15 @@ class EBayBrowseAPI:
         url = f"{self.base_url}/item/{item_id}"
         
         try:
-            response = requests.get(url, headers=self.headers)
+            response = requests.get(url, headers=self.headers, timeout=30)
             response.raise_for_status()
+            response.encoding = 'utf-8'  # エンコーディング明示
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"Item details error: {e}")
+            print(f"Item details error: {str(e).encode('utf-8', errors='ignore').decode('utf-8')}")
+            return None
+        except Exception as e:
+            print(f"Parse error: {str(e).encode('utf-8', errors='ignore').decode('utf-8')}")
             return None
 
 class JapaneseProductAnalyzer:
@@ -91,10 +107,16 @@ class JapaneseProductAnalyzer:
         
         try:
             response = self.model.generate_content(prompt)
-            return response.text
+            # レスポンスを安全にエンコード
+            result_text = response.text
+            if isinstance(result_text, str):
+                # 安全な文字のみ保持
+                result_text = result_text.encode('utf-8', errors='ignore').decode('utf-8')
+            return result_text
         except Exception as e:
-            print(f"Analysis error: {e}")
-            return f"分析中にエラーが発生しました: {str(e)}"
+            error_msg = f"分析中にエラーが発生しました: {str(e).encode('utf-8', errors='ignore').decode('utf-8')}"
+            print(error_msg)
+            return error_msg
     
     def _prepare_analysis_data(self, products_data):
         """分析用のデータを準備"""
@@ -130,11 +152,14 @@ class JapaneseProductAnalyzer:
                     analysis_data['price_ranges']['500+'] += 1
             
             # キーワード分析
-            title = item.get('title', '').lower()
-            japanese_keywords = ['japanese', 'japan', 'kimono', 'sushi', 'anime', 'manga', 'zen', 'samurai']
-            for keyword in japanese_keywords:
-                if keyword in title:
-                    analysis_data['keywords'][keyword] = analysis_data['keywords'].get(keyword, 0) + 1
+            title = item.get('title', '')
+            if title:
+                # 安全な文字列処理
+                title = str(title).encode('utf-8', errors='ignore').decode('utf-8').lower()
+                japanese_keywords = ['japanese', 'japan', 'kimono', 'sushi', 'anime', 'manga', 'zen', 'samurai']
+                for keyword in japanese_keywords:
+                    if keyword in title:
+                        analysis_data['keywords'][keyword] = analysis_data['keywords'].get(keyword, 0) + 1
             
             # 出品者分析
             seller = item.get('seller', {}).get('username', 'Unknown')
@@ -184,11 +209,17 @@ class JapaneseProductAnalyzer:
 
 def get_ebay_oauth_token(client_id, client_secret):
     """Application OAuthトークンを取得"""
+    import base64
+    
     url = "https://api.ebay.com/identity/v1/oauth2/token"
+    
+    # Base64エンコーディング
+    credentials = f"{client_id}:{client_secret}"
+    credentials_b64 = base64.b64encode(credentials.encode()).decode('ascii')
     
     headers = {
         'Content-Type': 'application/x-www-form-urlencoded',
-        'Authorization': f'Basic {client_id}:{client_secret}'
+        'Authorization': f'Basic {credentials_b64}'
     }
     
     data = {
@@ -197,12 +228,15 @@ def get_ebay_oauth_token(client_id, client_secret):
     }
     
     try:
-        response = requests.post(url, headers=headers, data=data)
+        response = requests.post(url, headers=headers, data=data, timeout=30)
         response.raise_for_status()
         token_data = response.json()
         return token_data.get('access_token')
     except requests.exceptions.RequestException as e:
-        print(f"OAuth token error: {e}")
+        print(f"OAuth token error: {str(e).encode('utf-8', errors='ignore').decode('utf-8')}")
+        return None
+    except Exception as e:
+        print(f"OAuth parse error: {str(e).encode('utf-8', errors='ignore').decode('utf-8')}")
         return None
 
 @app.route('/analyze-japanese-products', methods=['GET', 'POST'])
@@ -274,13 +308,23 @@ def analyze_japanese_products():
         print(analysis_result)
         print("="*60)
         
-        # サンプル商品情報も出力
+        # サンプル商品情報も出力（安全な文字列処理）
         print(f"\n📊 取得した商品サンプル (最初の5件):")
         for i, product in enumerate(all_products[:5], 1):
-            print(f"\n{i}. {product.get('title', 'タイトル不明')}")
-            print(f"   価格: {product.get('price', {}).get('value', 'N/A')} {product.get('price', {}).get('currency', '')}")
-            print(f"   出品者: {product.get('seller', {}).get('username', 'N/A')}")
-            print(f"   URL: {product.get('itemWebUrl', 'N/A')}")
+            try:
+                title = str(product.get('title', 'タイトル不明')).encode('utf-8', errors='ignore').decode('utf-8')
+                price_val = product.get('price', {}).get('value', 'N/A')
+                currency = product.get('price', {}).get('currency', '')
+                seller = str(product.get('seller', {}).get('username', 'N/A')).encode('utf-8', errors='ignore').decode('utf-8')
+                url = product.get('itemWebUrl', 'N/A')
+                
+                print(f"\n{i}. {title}")
+                print(f"   価格: {price_val} {currency}")
+                print(f"   出品者: {seller}")
+                print(f"   URL: {url}")
+            except Exception as e:
+                print(f"\n{i}. 商品情報表示エラー: {str(e)}")
+                continue
         
         # レスポンス作成
         result = {
