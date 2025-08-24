@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, request, redirect, session
+from flask import Flask, render_template, jsonify
 import requests
 import json
 import os
@@ -8,8 +8,6 @@ import random
 import base64
 import re
 from typing import List, Dict, Any
-from datetime import datetime, timedelta
-import secrets
 
 # .envファイルを読み込む関数
 def load_env():
@@ -30,15 +28,12 @@ def load_env():
 load_env()
 
 app = Flask(__name__)
-app.secret_key = secrets.token_hex(16)  # セッション用のシークレットキー
 
 # 環境変数
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 EBAY_APP_ID = os.getenv('EBAY_APP_ID')
 EBAY_CLIENT_SECRET = os.getenv('EBAY_CLIENT_SECRET')
 EBAY_OAUTH_TOKEN = os.getenv('EBAY_OAUTH_TOKEN')
-EBAY_REFRESH_TOKEN = os.getenv('EBAY_REFRESH_TOKEN')
-EBAY_REDIRECT_URI = os.getenv('EBAY_REDIRECT_URI', 'http://localhost:5000/auth/callback')
 
 # 環境変数の確認
 if not all([GEMINI_API_KEY, EBAY_APP_ID, EBAY_CLIENT_SECRET]):
@@ -47,184 +42,94 @@ if not all([GEMINI_API_KEY, EBAY_APP_ID, EBAY_CLIENT_SECRET]):
     print(f"EBAY_APP_ID: {'✓' if EBAY_APP_ID else '✗'}")
     print(f"EBAY_CLIENT_SECRET: {'✓' if EBAY_CLIENT_SECRET else '✗'}")
 
-class eBayOAuthManager:
+class eBayTokenManager:
     def __init__(self):
-        self.app_id = EBAY_APP_ID
-        self.client_secret = EBAY_CLIENT_SECRET
-        self.redirect_uri = EBAY_REDIRECT_URI
-        self.sandbox = False  # 本番環境用
+        self.app_id = os.getenv('EBAY_APP_ID')
+        self.client_secret = os.getenv('EBAY_CLIENT_SECRET')
 
-        # エンドポイント設定
-        if self.sandbox:
-            self.auth_base_url = "https://auth.sandbox.ebay.com/oauth2/authorize"
-            self.token_url = "https://api.sandbox.ebay.com/identity/v1/oauth2/token"
-        else:
-            self.auth_base_url = "https://auth.ebay.com/oauth2/authorize"
-            self.token_url = "https://api.ebay.com/identity/v1/oauth2/token"
+    def generate_new_application_token(self):
+        print("=== 修正版 Application Token生成 ===")
 
-    def get_authorization_url(self):
-        """認可URLを生成"""
-        state = secrets.token_urlsafe(32)
-        session['oauth_state'] = state
-
-        params = {
-            'client_id': self.app_id,
-            'response_type': 'code',
-            'redirect_uri': self.redirect_uri,
-            'scope': 'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/buy.order.readonly',
-            'state': state
-        }
-
-        auth_url = f"{self.auth_base_url}?{urllib.parse.urlencode(params)}"
-        print(f"🔗 認可URL生成: {auth_url}")
-        return auth_url
-
-    def exchange_code_for_token(self, code, state):
-        """認可コードをアクセストークンに交換"""
-        print("=== 認可コードをトークンに交換 ===")
-
-        # state検証
-        if state != session.get('oauth_state'):
-            print("❌ State検証失敗")
+        if not all([self.app_id, self.client_secret]):
+            print("❌ 必要な情報が不足:")
+            print(f"   EBAY_APP_ID: {'✓' if self.app_id else '✗'}")
+            print(f"   EBAY_CLIENT_SECRET: {'✓' if self.client_secret else '✗'}")
             return None
 
         try:
-            credentials = f"{self.app_id}:{self.client_secret}"
-            encoded_credentials = base64.b64encode(credentials.encode()).decode()
+            token_url = "https://api.ebay.com/identity/v1/oauth2/token"
+
+            # === eBay公式ドキュメントに従った認証ヘッダーのデバッグ ===
+            print("🔍 OAuth認証ヘッダーのデバッグ:")
+
+            # Step 1: client_id:client_secretの組み合わせ
+            credentials_raw = f"{self.app_id}:{self.client_secret}"
+            print(f"   Step 1 - Raw credentials: {self.app_id}:{self.client_secret}")
+            print(f"   Combined format: client_id:client_secret ✓")
+
+            # Step 2: Base64エンコーディング
+            encoded_credentials = base64.b64encode(credentials_raw.encode()).decode()
+            print(f"   Step 2 - Base64 encoded: {encoded_credentials[:20]}...")
+
+            # Step 3: Authorization ヘッダーの構築
+            auth_header_value = f'Basic {encoded_credentials}'
+            print(f"   Step 3 - Authorization header: Basic [B64_ENCODED_CREDENTIALS]")
+            print(f"   Header format check: 'Basic ' + space + credentials ✓")
 
             headers = {
                 'Content-Type': 'application/x-www-form-urlencoded',
-                'Authorization': f'Basic {encoded_credentials}'
+                'Authorization': auth_header_value
             }
+
+            # === リクエストヘッダーの確認 ===
+            print("📤 送信ヘッダー:")
+            for key, value in headers.items():
+                if key == 'Authorization':
+                    print(f"   {key}: Basic [MASKED_FOR_SECURITY]")
+                else:
+                    print(f"   {key}: {value}")
 
             data = {
-                'grant_type': 'authorization_code',
-                'code': code,
-                'redirect_uri': self.redirect_uri
+                'grant_type': 'client_credentials',
+                'scope': 'https://api.ebay.com/oauth/api_scope'
             }
 
-            print(f"📤 トークン交換リクエスト送信中...")
-            response = requests.post(self.token_url, headers=headers, data=data, timeout=30)
+            print("📤 送信データ:")
+            for key, value in data.items():
+                print(f"   {key}: {value}")
+
+            print(f"📤 トークンリクエスト送信中...")
+            response = requests.post(token_url, headers=headers, data=data, timeout=30)
+
+            # rlogIdをレスポンスヘッダーから取得
+            rlog_id = (response.headers.get('X-EBAY-C-REQUEST-ID') or
+                      response.headers.get('X-Ebay-C-Request-Id') or
+                      response.headers.get('x-ebay-c-request-id') or
+                      response.headers.get('rlogid'))  # この行を追加
 
             print(f"📨 レスポンス: {response.status_code}")
+            print(f"🆔 rlogId: {rlog_id}")
+
+            # 全レスポンスヘッダーを出力
+            print("📋 全レスポンスヘッダー:")
+            for key, value in response.headers.items():
+                print(f"   {key}: {value}")
 
             if response.status_code == 200:
                 token_data = response.json()
                 access_token = token_data.get('access_token')
-                refresh_token = token_data.get('refresh_token')
                 expires_in = token_data.get('expires_in')
-
-                # .envファイルを更新
-                self.update_env_file(access_token, refresh_token)
-
-                print(f"✅ トークン取得成功! (有効期限: {expires_in/3600:.1f}時間)")
-                return {
-                    'access_token': access_token,
-                    'refresh_token': refresh_token,
-                    'expires_in': expires_in
-                }
+                print(f"✅ トークン生成成功!")
+                print(f"   有効期限: {expires_in/3600:.1f}時間")
+                return access_token
             else:
-                print(f"❌ トークン取得失敗: {response.status_code}")
-                print(f"   エラー: {response.text}")
+                print(f"❌ トークン生成失敗: {response.status_code}")
+                print(f"   エラー詳細: {response.text}")
                 return None
 
         except Exception as e:
-            print(f"❌ トークン取得エラー: {e}")
+            print(f"❌ トークン生成エラー: {e}")
             return None
-
-    def refresh_access_token(self, refresh_token):
-        """リフレッシュトークンでアクセストークンを更新"""
-        print("=== アクセストークンをリフレッシュ ===")
-
-        try:
-            credentials = f"{self.app_id}:{self.client_secret}"
-            encoded_credentials = base64.b64encode(credentials.encode()).decode()
-
-            headers = {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Authorization': f'Basic {encoded_credentials}'
-            }
-
-            data = {
-                'grant_type': 'refresh_token',
-                'refresh_token': refresh_token
-            }
-
-            print(f"📤 リフレッシュリクエスト送信中...")
-            response = requests.post(self.token_url, headers=headers, data=data, timeout=30)
-
-            print(f"📨 レスポンス: {response.status_code}")
-
-            if response.status_code == 200:
-                token_data = response.json()
-                access_token = token_data.get('access_token')
-                new_refresh_token = token_data.get('refresh_token', refresh_token)  # 新しいリフレッシュトークンまたは既存のもの
-                expires_in = token_data.get('expires_in')
-
-                # .envファイルを更新
-                self.update_env_file(access_token, new_refresh_token)
-
-                print(f"✅ トークンリフレッシュ成功! (有効期限: {expires_in/3600:.1f}時間)")
-                return {
-                    'access_token': access_token,
-                    'refresh_token': new_refresh_token,
-                    'expires_in': expires_in
-                }
-            else:
-                print(f"❌ トークンリフレッシュ失敗: {response.status_code}")
-                print(f"   エラー: {response.text}")
-                return None
-
-        except Exception as e:
-            print(f"❌ トークンリフレッシュエラー: {e}")
-            return None
-
-    def update_env_file(self, access_token, refresh_token):
-        """環境変数とenvファイルを更新"""
-        global EBAY_OAUTH_TOKEN, EBAY_REFRESH_TOKEN
-
-        # メモリ内の環境変数を更新
-        EBAY_OAUTH_TOKEN = access_token
-        EBAY_REFRESH_TOKEN = refresh_token
-        os.environ['EBAY_OAUTH_TOKEN'] = access_token
-        os.environ['EBAY_REFRESH_TOKEN'] = refresh_token
-
-        # .envファイルを更新
-        try:
-            env_path = os.path.join(os.path.dirname(__file__), '.env')
-
-            # 既存の.envファイルを読み込み
-            env_lines = []
-            if os.path.exists(env_path):
-                with open(env_path, 'r', encoding='utf-8') as f:
-                    env_lines = f.readlines()
-
-            # トークン行を更新または追加
-            oauth_token_updated = False
-            refresh_token_updated = False
-
-            for i, line in enumerate(env_lines):
-                if line.startswith('EBAY_OAUTH_TOKEN='):
-                    env_lines[i] = f'EBAY_OAUTH_TOKEN={access_token}\n'
-                    oauth_token_updated = True
-                elif line.startswith('EBAY_REFRESH_TOKEN='):
-                    env_lines[i] = f'EBAY_REFRESH_TOKEN={refresh_token}\n'
-                    refresh_token_updated = True
-
-            # 新しい行を追加
-            if not oauth_token_updated:
-                env_lines.append(f'EBAY_OAUTH_TOKEN={access_token}\n')
-            if not refresh_token_updated:
-                env_lines.append(f'EBAY_REFRESH_TOKEN={refresh_token}\n')
-
-            # ファイルに書き込み
-            with open(env_path, 'w', encoding='utf-8') as f:
-                f.writelines(env_lines)
-
-            print("✅ .envファイルを更新しました")
-
-        except Exception as e:
-            print(f"⚠️ .envファイル更新エラー: {e}")
 
     def test_token_validity(self, token):
         """トークンの有効性をテスト"""
@@ -249,10 +154,10 @@ class eBayOAuthManager:
 
 class SmarteBayAnalyzer:
     def __init__(self):
-        global EBAY_OAUTH_TOKEN, EBAY_REFRESH_TOKEN
+        global EBAY_OAUTH_TOKEN
 
         self.base_url = "https://api.ebay.com/buy/browse/v1"
-        self.oauth_manager = eBayOAuthManager()
+        self.token_manager = eBayTokenManager()
 
         # 日本関連キーワード辞書
         self.japanese_keywords = {
@@ -265,54 +170,45 @@ class SmarteBayAnalyzer:
             'brands': ['nintendo', 'sony', 'honda', 'toyota', 'canon', 'nikon', 'casio', 'citizen', 'seiko', 'uniqlo', 'muji']
         }
 
-        # トークン管理
-        self.setup_authentication()
-
-    def setup_authentication(self):
-        """認証の設定"""
-        global EBAY_OAUTH_TOKEN, EBAY_REFRESH_TOKEN
-
-        print("=== eBay API 認証設定 ===")
-
+        # トークン設定
         current_token = EBAY_OAUTH_TOKEN
-        current_refresh_token = EBAY_REFRESH_TOKEN
 
-        # トークンの有効性をチェック
-        if current_token and self.oauth_manager.test_token_validity(current_token):
+        print("=== eBay API トークン診断 ===")
+        if current_token and self.token_manager.test_token_validity(current_token):
             print("✅ 現在のトークンは有効です")
+        else:
+            print("🔄 新しいトークンを生成します...")
+            new_token = self.token_manager.generate_new_application_token()
+
+            if new_token:
+                current_token = new_token
+                EBAY_OAUTH_TOKEN = new_token
+                os.environ['EBAY_OAUTH_TOKEN'] = new_token
+                print("✅ 新しいトークンを設定しました")
+            else:
+                print("❌ トークン生成に失敗しました")
+                current_token = None
+
+        # ヘッダーを設定
+        if current_token:
             self.headers = {
                 'Authorization': f'Bearer {current_token}',
                 'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US',
                 'Accept': 'application/json',
                 'User-Agent': 'eBayAnalyzer/1.0'
             }
-        elif current_refresh_token:
-            print("🔄 トークンをリフレッシュします...")
-            token_data = self.oauth_manager.refresh_access_token(current_refresh_token)
-
-            if token_data:
-                self.headers = {
-                    'Authorization': f'Bearer {token_data["access_token"]}',
-                    'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US',
-                    'Accept': 'application/json',
-                    'User-Agent': 'eBayAnalyzer/1.0'
-                }
-                print("✅ トークンをリフレッシュしました")
-            else:
-                print("❌ トークンリフレッシュに失敗しました。再認証が必要です")
-                self.headers = None
+            print("✅ APIヘッダー設定完了")
         else:
-            print("❌ 有効なトークンがありません。認証が必要です")
-            self.headers = None
-
-    def requires_authentication(self):
-        """認証が必要かどうかをチェック"""
-        return self.headers is None
+            print("❌ 有効なトークンがありません")
+            self.headers = {
+                'Accept': 'application/json',
+                'User-Agent': 'eBayAnalyzer/1.0'
+            }
 
     def get_japanese_items_smart(self, limit: int = 200) -> List[Dict[Any, Any]]:
         """効率的に日本関連商品を取得"""
-        if self.requires_authentication():
-            print("❌ 認証が必要です。/auth/loginにアクセスしてください")
+        if 'Authorization' not in self.headers:
+            print("❌ 有効なトークンがありません")
             return []
 
         all_items = []
@@ -351,12 +247,11 @@ class SmarteBayAnalyzer:
                 response = requests.get(url, params=params, headers=self.headers, timeout=30)
 
                 if response.status_code == 401:
-                    print("   ❌ 認証エラー: トークンをリフレッシュします")
-                    if EBAY_REFRESH_TOKEN:
-                        token_data = self.oauth_manager.refresh_access_token(EBAY_REFRESH_TOKEN)
-                        if token_data:
-                            self.headers['Authorization'] = f'Bearer {token_data["access_token"]}'
-                            response = requests.get(url, params=params, headers=self.headers, timeout=30)
+                    print("   ❌ 認証エラー: トークンを再生成します")
+                    new_token = self.token_manager.generate_new_application_token()
+                    if new_token:
+                        self.headers['Authorization'] = f'Bearer {new_token}'
+                        response = requests.get(url, params=params, headers=self.headers, timeout=30)
 
                 if response.status_code == 200:
                     data = response.json()
@@ -370,9 +265,6 @@ class SmarteBayAnalyzer:
 
                 else:
                     print(f"   ❌ エラー: {response.status_code}")
-                    if response.status_code == 401:
-                        print("   再認証が必要です")
-                        return []
 
             except Exception as e:
                 print(f"   ❌ リクエストエラー: {e}")
@@ -672,66 +564,15 @@ class EfficientGeminiAnalyzer:
 ebay_analyzer = SmarteBayAnalyzer()
 gemini_analyzer = EfficientGeminiAnalyzer()
 
-# ルート定義
 @app.route('/')
 def index():
     """メインページ"""
-    if ebay_analyzer.requires_authentication():
-        return render_template('index.html')
     return render_template('index.html')
-
-@app.route('/auth/login')
-def auth_login():
-    """eBay認証開始"""
-    oauth_manager = eBayOAuthManager()
-    auth_url = oauth_manager.get_authorization_url()
-    return redirect(auth_url)
-
-@app.route('/auth/callback')
-def auth_callback():
-    """eBay認証コールバック"""
-    code = request.args.get('code')
-    state = request.args.get('state')
-    error = request.args.get('error')
-
-    if error:
-        return jsonify({'error': f'認証エラー: {error}'}), 400
-
-    if not code or not state:
-        return jsonify({'error': '認証パラメータが不足しています'}), 400
-
-    oauth_manager = eBayOAuthManager()
-    token_data = oauth_manager.exchange_code_for_token(code, state)
-
-    if token_data:
-        # 認証成功後、アナライザーを再初期化
-        global ebay_analyzer
-        ebay_analyzer = SmarteBayAnalyzer()
-        return redirect('/')
-    else:
-        return jsonify({'error': 'トークン取得に失敗しました'}), 400
-
-@app.route('/api/auth/status')
-def auth_status():
-    """認証状態を確認"""
-    is_authenticated = not ebay_analyzer.requires_authentication()
-    return jsonify({
-        'authenticated': is_authenticated,
-        'message': '認証済み' if is_authenticated else '認証が必要です'
-    })
 
 @app.route('/api/analyze')
 def analyze_items():
     """効率化された商品分析API"""
     try:
-        # 認証チェック
-        if ebay_analyzer.requires_authentication():
-            return jsonify({
-                'success': False,
-                'error': 'eBay認証が必要です',
-                'auth_required': True
-            })
-
         # 1. eBayから日本関連商品を効率的に取得
         print("=" * 50)
         print("🛍️ 日本関連商品を取得中...")
@@ -740,8 +581,7 @@ def analyze_items():
         if not japanese_items:
             return jsonify({
                 'success': False,
-                'error': 'eBayから商品を取得できませんでした',
-                'auth_required': ebay_analyzer.requires_authentication()
+                'error': 'eBayから商品を取得できませんでした'
             })
 
         print(f"✅ {len(japanese_items)}件の日本関連商品を取得")
@@ -772,21 +612,13 @@ def analyze_items():
         print(f"詳細エラー: {traceback.format_exc()}")
         return jsonify({
             'success': False,
-            'error': str(e),
-            'auth_required': ebay_analyzer.requires_authentication()
+            'error': str(e)
         })
 
 @app.route('/api/detailed_analysis/<item_id>')
 def get_detailed_analysis(item_id):
     """個別商品の詳細分析"""
     try:
-        if ebay_analyzer.requires_authentication():
-            return jsonify({
-                'success': False,
-                'error': '認証が必要です',
-                'auth_required': True
-            })
-
         # 商品詳細を取得
         url = f"{ebay_analyzer.base_url}/item/{item_id}"
         response = requests.get(url, headers=ebay_analyzer.headers, timeout=15)
@@ -807,43 +639,6 @@ def get_detailed_analysis(item_id):
 
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
-
-@app.route('/api/refresh_token')
-def refresh_token():
-    """手動でトークンをリフレッシュ"""
-    try:
-        global EBAY_REFRESH_TOKEN
-
-        if not EBAY_REFRESH_TOKEN:
-            return jsonify({
-                'success': False,
-                'error': 'リフレッシュトークンがありません'
-            })
-
-        oauth_manager = eBayOAuthManager()
-        token_data = oauth_manager.refresh_access_token(EBAY_REFRESH_TOKEN)
-
-        if token_data:
-            # アナライザーを再初期化
-            global ebay_analyzer
-            ebay_analyzer = SmarteBayAnalyzer()
-
-            return jsonify({
-                'success': True,
-                'message': 'トークンをリフレッシュしました',
-                'expires_in_hours': token_data['expires_in'] / 3600
-            })
-        else:
-            return jsonify({
-                'success': False,
-                'error': 'トークンリフレッシュに失敗しました'
-            })
-
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        })
 
 # if __name__ == '__main__':
 #     app.run(debug=True)
